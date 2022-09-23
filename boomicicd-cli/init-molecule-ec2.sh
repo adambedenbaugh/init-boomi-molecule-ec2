@@ -5,21 +5,19 @@
 
 properties () {
     # Local References
-    export LOCALBOOMI=/boomi/local
+    export BOOMI_DIR=/boomi
+    # Local References
+    export LOCAL_BOOMI=$BOOMI_DIR/local
     # Local directory reference where temp, work and java will reside ... will be created as a part of the automation
-    export LOCALWORKINGDIR=/boomi/local/work
+    export LOCAL_WORKING_DIR=$BOOMI_DIR/local/work
     # Local Boomi working directory ... will be created as a part of the automation
-    export LOCALTEMPDIR=/boomi/local/tmp
+    export LOCAL_TEMP_DIR=$BOOMI_DIR/local/tmp
     # Local Boomi temp directory ... will be created as a part of the automation
-    export LOCALJAVADIR=/apps/products/jdk
-    # Local Boomi JDK directory ... will be created as a part of the automation
-    export LOCALJREDIR=/apps/products/jdk/jre
-    # Local Boomi JRE directory ... will be created as a part of the automation
-    export INSTALL_DIR=/boomi/share/molecule
+    export INSTALL_DIR=$BOOMI_DIR/share/molecule
     # The Boomi Molecule will be installed at this directory
-    export MOUNT=/boomi/share
+    export MOUNT=$BOOMI_DIR/share
     # Mount point which is used for sysctl
-    export FILESHAREDNS=fs-0297ae8669dd537ad.efs.us-east-1.amazonaws.com
+    export FILE_SHARE_DNS=<aws-efs-id>.efs.<aws-region>.amazonaws.com
     # DNS for EFS fileshare. Used to add to /etc/fstab
     export SERVICE_ACCOUNT=boomi
     # Service Account Name
@@ -37,7 +35,7 @@ properties () {
     export atomType="MOLECULE"
     export atomName="molecule_test"
     # Name of the Molecule. Do not use dashes.
-    export environmentId=d2df5435-c763-46c4-b7c0-79cf308f577c
+    export environmentId=<boomi-environment-id>
     # Environment to attach the Runtime to
     export classification=TEST
     # TEST or PROD environment classification
@@ -68,6 +66,7 @@ properties () {
 }
 
 getPackageManager () {
+
     if [ -x "$(command -v apt-get)" ]; 
         then 
         echo "apt-get"
@@ -78,7 +77,9 @@ getPackageManager () {
         then 
         echo "yum"
     else echo "FAILED TO INSTALL: Package manager not found.">&2; fi
+
 }
+
 
 packageUpdate () {
 
@@ -129,10 +130,11 @@ osPrep () {
     fi
 
     # Set Firewall rules with firewalld
+    PACKAGE_MANAGER="$(getPackageManager)"
     sudo $PACKAGE_MANAGER install -y firewalld
     sudo systemctl enable firewalld
     sudo systemctl start firewalld
-    printf "\nShell script is setting firewall ports \n"
+    echo "Setting firewall ports"
     sudo firewall-cmd --permanent --add-port 5002/tcp
     sudo firewall-cmd --permanent --add-port 7800/tcp
     sudo firewall-cmd --permanent --add-port 9090/tcp
@@ -141,11 +143,11 @@ osPrep () {
     sudo firewall-cmd --reload
 
     #Making directory and changing permission set as well as local work/temp
-    sudo mkdir -p ${LOCALWORKINGDIR}
-    sudo mkdir -p ${LOCALTEMPDIR}
+    sudo mkdir -p ${LOCAL_WORKING_DIR}
+    sudo mkdir -p ${LOCAL_TEMP_DIR}
     sudo mkdir -p ${INSTALL_DIR}
 
-    sudo chown -R $SERVICE_ACCOUNT:$SERVICE_ACCOUNT ${LOCALBOOMI}
+    sudo chown -R $SERVICE_ACCOUNT:$SERVICE_ACCOUNT ${BOOMI_DIR}
 
 }
 
@@ -162,7 +164,7 @@ mountEBS () {
         DISKTOMOUNTUUID=$(lsblk --fs --json |
         jq -r --arg DISKTOMOUNT "$DISKTOMOUNT" '.blockdevices[] | select(.name==$DISKTOMOUNT) | .uuid')
 
-        echo -e "UUID=$DISKTOMOUNTUUID\t$LOCALBOOMI\txfs\tdefaults,nofail\t0 2" | sudo tee -a /etc/fstab    
+        echo -e "UUID=$DISKTOMOUNTUUID\t$LOCAL_BOOMI\txfs\tdefaults,nofail\t0 2" | sudo tee -a /etc/fstab    
         sudo mount -a
     fi
 
@@ -174,11 +176,11 @@ mountEFS () {
     sudo dnf install -y nfs-utils
 
     # Mount EFS
-    if grep -Fwq "$FILESHAREDNS" /etc/fstab
+    if grep -Fwq "$FILE_SHARE_DNS" /etc/fstab
     then
         echo "EFS has already been mounted, skipping..."
     else
-        echo -e "$FILESHAREDNS:/\t$MOUNT\tnfs4\tnfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport" | sudo tee -a /etc/fstab
+        echo -e "$FILE_SHARE_DNS:/\t$MOUNT\tnfs4\tnfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport" | sudo tee -a /etc/fstab
         sudo mount -a
     fi
 
@@ -201,9 +203,8 @@ installMolecule () {
     -VenvironmentId=$environmentId \
     -dir ${INSTALL_DIR} \
     -VatomName=$atomName \
-    -VlocalPath=${LOCALWORKINGDIR} \
-    -VlocalTempPath=${LOCALTEMPDIR} \
-    -dir ${INSTALL_DIR} 
+    -VlocalPath=${LOCAL_WORKING_DIR} \
+    -VlocalTempPath=${LOCAL_TEMP_DIR} 
 
     # Update Advanced and Custom Properties
     echo "com.boomi.container.cloudlet.clusterConfig=UNICAST" | sudo tee -a $ATOM_HOME/conf/container.properties
@@ -229,7 +230,8 @@ installMolecule () {
 
 
 setSharedWebServer () {
-    printf "Configuring Shared Web Server Settings ..."
+
+    echo "Configuring Shared Web Server Settings ..."
     properties
 
     # Get Molecule Id
@@ -251,7 +253,7 @@ changeOwner () {
     properties
     cd "$ATOM_HOME/bin"
     # ./atom stop
-    printf "Sleeping to ensure the runtime is fully down ..."
+    echo "Sleeping to ensure the runtime is fully down ..."
     sleep 15
     returnMessage=$(./atom status)
     returnCode=$?
@@ -265,44 +267,45 @@ changeOwner () {
     fi
     printf "Changing ownership ... \n"
     sudo chown -R $SERVICE_ACCOUNT:$SERVICE_ACCOUNT $MOUNT
-    sudo chown -R $SERVICE_ACCOUNT:$SERVICE_ACCOUNT $LOCALBOOMI
+    sudo chown -R $SERVICE_ACCOUNT:$SERVICE_ACCOUNT $LOCAL_BOOMI
     sudo -u $SERVICE_ACCOUNT ./atom start
 
 }
 
 
-
-
 setRestartScript () {
 
     # Update restart script to use systemd
+    properties
+    echo "Updating restart script to use systemd."
     {
     echo '#!/bin/sh
 # ENV variables
 # LOCALHOST_ID - set if script is invoked by a cluster node.
+LOCALHOST_ID=$(hostname -I | sed '\''s/\./_/g'\'' | xargs)
 # service_name - set based on systemd service definition file. e.g. "molecule" for "molecule.service"
-restart_log="restart\${LOCALHOST_ID}.log"
+restart_log="restart_${LOCALHOST_ID}.log"
 service_name="molecule"
 
 service_start() {
     log_info "Starting Atom via systemd"
-    sudo /bin/systemctl start \$service_name
-    if [ \$returnCode -eq 0 ]; then
-        log_info " > Successfully started Atom service (\$returnCode)"
+    sudo /bin/systemctl start $service_name
+    if [ $returnCode -eq 0 ]; then
+        log_info " > Successfully started Atom service ($returnCode)"
     else
-        log_warn " > Atom service not started (\$returnCode).. sleeping 5sec.."
+        log_warn " > Atom service not started ($returnCode).. sleeping 5sec.."
         sleep 5
     fi
 }
 
 service_stop() {
     log_info "Stopping Atom via systemd"
-    sudo /bin/systemctl stop \$service_name
+    sudo /bin/systemctl stop $service_name
     returnCode=$?
-    if [ \$returnCode -eq 0 ]; then
-        log_info " > Successfully stopped Atom service (\$returnCode)"
+    if [ $returnCode -eq 0 ]; then
+        log_info " > Successfully stopped Atom service ($returnCode)"
     else
-        log_warn " > Atom service not stopped (\$returnCode).. sleeping 5sec.."
+        log_warn " > Atom service not stopped ($returnCode).. sleeping 5sec.."
         sleep 5
     fi
 }
@@ -310,51 +313,51 @@ service_stop() {
 service_status() {
     local status=1
     log_info "Checking systemd status"
-    ActiveState=$(sudo /bin/systemctl show -p ActiveState \$service_name)
-    log_info " > \$ActiveState"
-    if [[ \$ActiveState = "ActiveState=active" ]]; then
-        SubState=$(sudo /bin/systemctl show -p SubState \$service_name)
-        log_info " > \$SubState"
-        if [[ \$SubState = "SubState=running" ]]; then
-            ExecMainPID=$(sudo /bin/systemctl show -p ExecMainPID \$service_name)
-            log_info " > \$ExecMainPID"
-            if [[ \$ExecMainPID = "ExecMainPID=0" ]]; then
+    ActiveState=$(sudo /bin/systemctl show -p ActiveState $service_name)
+    log_info " > $ActiveState"
+    if [[ $ActiveState = "ActiveState=active" ]]; then
+        SubState=$(sudo /bin/systemctl show -p SubState $service_name)
+        log_info " > $SubState"
+        if [[ $SubState = "SubState=running" ]]; then
+            ExecMainPID=$(sudo /bin/systemctl show -p ExecMainPID $service_name)
+            log_info " > $ExecMainPID"
+            if [[ $ExecMainPID = "ExecMainPID=0" ]]; then
                 log_warn " > Issue with PID detection identified. Please check the state of the Atom and systemd manually"
             fi
             status=0
         fi
     fi
-    echo \$status
+    echo $status
 }
 
 log_info() {
-    log "[INFO]" "\$1"
+    log "[INFO]" "$1"
 }
 
 log_err() {
-    log "[ERROR]" "\$1"
+    log "[ERROR]" "$1"
 }
 
 log_warn() {
-    log "[WARNING]" "\$1"
+    log "[WARNING]" "$1"
 }
 
 log() {
-    datestring=$(date +'\''%Y-%m-%d %H:%M:%S'\'')
-    echo -e "\$datestring \$1: \$2" >>"\${restart_log}" 2>&1
+    datestring=`date +'\''%Y-%m-%d %H:%M:%S'\''`
+    echo -e "$datestring $1: $2" >>"${restart_log}" 2>&1
 }
 
-echo "=====================================================================" >>"\${restart_log}" 2>&1
+echo "=====================================================================" >>"${restart_log}" 2>&1
 log_info "Initiating shutdown sequence.."
 #Attempt shutdown via systemd
 service_stop
 #Check status of atom and if not stopped, try to stop it manually
 for i in 1 2 3 4 5; do
-    log_info "Checking Atom Status (Attempt \$i)"
+    log_info "Checking Atom Status (Attempt $i)"
     returnMessage=$(./atom status)
-    returnCode=\$?
-    log_info " > \$returnMessage - Code: \$returnCode"
-    if [ \$returnCode -ne 0 ]; then
+    returnCode=$?
+    log_info " > $returnMessage - Code: $returnCode"
+    if [ $returnCode -ne 0 ]; then
         log_info " > Atom stopped successfully"
         atom_status="stopped"
         break
@@ -363,14 +366,14 @@ for i in 1 2 3 4 5; do
         log_info " > Atom still running.. sleeping 5sec.."
         sleep 5
     fi
-    if [ \$atom_status != "stopped" ]; then
+    if [ $atom_status != "stopped" ]; then
         log_info "Stopping Atom via atom command"
         returnMessage=$(./atom stop)
-        returnCode=\$?
-        log_info " > \$returnMessage - Code: \$returnCode"
+        returnCode=$?
+        log_info " > $returnMessage - Code: $returnCode"
     fi
 done
-if [ \$atom_status != "stopped" ]; then
+if [ $atom_status != "stopped" ]; then
     log_err "Failure to stop Atom, please check manually"
     exit 1
 fi
@@ -382,7 +385,7 @@ service_start
 #Check systemd service
 for i in 1 2 3 4 5; do
     service_status=$(service_status)
-    if [[ \$service_status != 0 ]]; then
+    if [[ $service_status != 0 ]]; then
         log_err "Failed to start systemd service.. sleeping 5sec.."
         sleep 5
     else
@@ -392,11 +395,11 @@ done
 
 #Check atom. If not started attempt to start manually and then trigger systemd start again
 for i in 1 2 3 4 5; do
-    log_info "Checking Atom Status (Attempt \$i)"
+    log_info "Checking Atom Status (Attempt $i)"
     returnMessage=$(./atom status)
-    returnCode=\$?
-    log_info " > \$returnMessage - Code: \$returnCode"
-    if [ \$returnCode -eq 0 ]; then
+    returnCode=$?
+    log_info " > $returnMessage - Code: $returnCode"
+    if [ $returnCode -eq 0 ]; then
         log_info " > Atom started successfully"
         atom_status="running"
         break
@@ -406,23 +409,33 @@ for i in 1 2 3 4 5; do
         sleep 20
     fi
 done
-if [ \$atom_status != "running" ]; then
+if [ $atom_status != "running" ]; then
     log_info "Starting Atom via atom command"
     returnMessage=$(./atom start)
-    returnCode=\$?
-    log_info "  > \$returnMessage - Code: \$returnCode"
+    returnCode=$?
+    log_info "  > $returnMessage - Code: $returnCode"
 fi
-if [[ \$service_status -ne 0 && \$atom_status != "running" ]]; then
+if [[ $service_status -ne 0 && $atom_status != "running" ]]; then
     log_err "Warning, something went wrong! Please check the state of the Atom and systemd manually as they may be out of sync"
 else
     log_info "Restart request completed successfully!"
-fi" |> \${ATOM_HOME}/bin/restart.sh' | sudo -u $SERVICE_ACCOUNT tee $ATOM_HOME/bin/restart.sh
+fi' | sudo -u $SERVICE_ACCOUNT tee $ATOM_HOME/bin/restart.sh
 
     } > /dev/null
 }
 
 
+disableSElinux () {
+
+    echo "Disabling SELinux..."
+    sudo setenforce 0
+    sudo sed -i "s%SELINUX=enforcing%SELINUX=disabled%g" /etc/selinux/config
+
+}
+
+
 setSysctl () {
+
     properties
     # cd /tmp
     runtime="molecule"
@@ -454,12 +467,6 @@ setSysctl () {
     WantedBy=multi-user.target" | sudo tee /etc/systemd/system/${runtime}.service 
     } > /dev/null
     
-
-    echo "Disabling SELinux..."
-    sudo setenforce 0
-    sudo sed -i "s%SELINUX=enforcing%SELINUX=disabled%g" /etc/selinux/config
-
-
     sudo systemctl daemon-reload
     sudo systemctl enable ${runtime}
     sleep 5
@@ -475,43 +482,43 @@ setSysctl () {
     then
         echo "$SERVICE_ACCOUNT ALL=NOPASSWD: /bin/systemctl start molecule, skipping ..."
     else
-        echo "$SERVICE_ACCOUNT ALL=NOPASSWD: /bin/systemctl start molecule" | (sudo su -c 'EDITOR="tee -a" visudo -f /etc/sudoers.d/boomi')
+        echo "$SERVICE_ACCOUNT ALL=NOPASSWD: /bin/systemctl start molecule" | (sudo su -c 'EDITOR="tee -a" visudo')
     fi
     if sudo grep -Fxq "$SERVICE_ACCOUNT ALL=NOPASSWD: /bin/systemctl stop molecule" /etc/sudoers.d/boomi
     then
         echo "$SERVICE_ACCOUNT ALL=NOPASSWD: /bin/systemctl stop molecule, skipping ..."
     else
-        echo "$SERVICE_ACCOUNT ALL=NOPASSWD: /bin/systemctl stop molecule" | (sudo su -c 'EDITOR="tee -a" visudo -f /etc/sudoers.d/boomi')
+        echo "$SERVICE_ACCOUNT ALL=NOPASSWD: /bin/systemctl stop molecule" | (sudo su -c 'EDITOR="tee -a" visudo')
     fi    
     if sudo grep -Fxq "$SERVICE_ACCOUNT ALL=NOPASSWD: /bin/systemctl restart molecule" /etc/sudoers.d/boomi
     then
         echo "$SERVICE_ACCOUNT ALL=NOPASSWD: /bin/systemctl restart molecule, skipping ..."
     else
-        echo "$SERVICE_ACCOUNT ALL=NOPASSWD: /bin/systemctl restart molecule" | (sudo su -c 'EDITOR="tee -a" visudo -f /etc/sudoers.d/boomi')
+        echo "$SERVICE_ACCOUNT ALL=NOPASSWD: /bin/systemctl restart molecule" | (sudo su -c 'EDITOR="tee -a" visudo')
     fi    
     if sudo grep -Fxq "$SERVICE_ACCOUNT ALL=NOPASSWD: /bin/systemctl status molecule" /etc/sudoers.d/boomi
     then
         echo "$SERVICE_ACCOUNT ALL=NOPASSWD: /bin/systemctl status molecule, skipping ..."
     else
-        echo "$SERVICE_ACCOUNT ALL=NOPASSWD: /bin/systemctl status molecule" | (sudo su -c 'EDITOR="tee -a" visudo -f /etc/sudoers.d/boomi')
+        echo "$SERVICE_ACCOUNT ALL=NOPASSWD: /bin/systemctl status molecule" | (sudo su -c 'EDITOR="tee -a" visudo')
     fi    
     if sudo grep -Fxq "$SERVICE_ACCOUNT ALL=NOPASSWD: /bin/systemctl show -p ActiveState molecule" /etc/sudoers.d/boomi
     then
         echo "$SERVICE_ACCOUNT ALL=NOPASSWD: /bin/systemctl show -p ActiveState molecule, skipping ..."
     else
-        echo "$SERVICE_ACCOUNT ALL=NOPASSWD: /bin/systemctl show -p ActiveState molecule" | (sudo su -c 'EDITOR="tee -a" visudo -f /etc/sudoers.d/boomi')
+        echo "$SERVICE_ACCOUNT ALL=NOPASSWD: /bin/systemctl show -p ActiveState molecule" | (sudo su -c 'EDITOR="tee -a" visudo')
     fi    
     if sudo grep -Fxq "$SERVICE_ACCOUNT ALL=NOPASSWD: /bin/systemctl show -p SubState molecule" /etc/sudoers.d/boomi
     then
         echo "$SERVICE_ACCOUNT ALL=NOPASSWD: /bin/systemctl show -p SubState molecule, skipping ..."
     else
-        echo "$SERVICE_ACCOUNT ALL=NOPASSWD: /bin/systemctl show -p SubState molecule" | (sudo su -c 'EDITOR="tee -a" visudo -f /etc/sudoers.d/boomi')
+        echo "$SERVICE_ACCOUNT ALL=NOPASSWD: /bin/systemctl show -p SubState molecule" | (sudo su -c 'EDITOR="tee -a" visudo')
     fi
     if sudo grep -Fxq "$SERVICE_ACCOUNT ALL=NOPASSWD: /bin/systemctl show -p ExecMainPID molecule" /etc/sudoers.d/boomi
     then
         echo "$SERVICE_ACCOUNT ALL=NOPASSWD: /bin/systemctl show -p ExecMainPID molecule, skipping ..."
     else
-        echo "$SERVICE_ACCOUNT ALL=NOPASSWD: /bin/systemctl show -p ExecMainPID molecule" | (sudo su -c 'EDITOR="tee -a" visudo -f /etc/sudoers.d/boomi')
+        echo "$SERVICE_ACCOUNT ALL=NOPASSWD: /bin/systemctl show -p ExecMainPID molecule" | (sudo su -c 'EDITOR="tee -a" visudo')
     fi
 
 }
@@ -532,12 +539,14 @@ echo "Updating packages..."
 properties
 PACKAGE_MANAGER="$(getPackageManager)"
 packageUpdate
+sudo $PACKAGE_MANAGER update -y
 sudo $PACKAGE_MANAGER install -y jq
 
 osPrep
 mountEBS
 mountEFS
 
+# Only perform install on initial node.
 if [ ! -e "$ATOM_HOME/bin/atom" ] 
 then
     installMolecule
@@ -548,6 +557,7 @@ else
     echo "Initial molecule node already installed."
 fi
 
+disableSElinux
 setSysctl
 
 
